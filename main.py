@@ -1,250 +1,244 @@
-import pickle
 import yfinance as yf
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import datetime 
-from sklearn.metrics import mean_squared_error, r2_score,confusion_matrix
-from datetime import datetime as dt
+from datetime import datetime, timedelta
+import pickle
+import os
 
-file_path = "stock_data.csv"
-
-# Function to create and save the initial model using Gradient Descent
-def create_model():
-    today = "2025-04-01"  # Hardcoding today's date for initial training
-    start_date = "2005-01-01"  # Start date for fetching historical data
-
-    # Fetch stock data (AAPL) from Yahoo Finance
-    stock_data = yf.download("AAPL", start=start_date, end=today)
-    
-    print(stock_data)
-
-    stock_data = stock_data.dropna()
-    
-
-    # Prepare the data (OHLV)
-    X = stock_data[['Open', 'High', 'Low', 'Volume']].values
-    y = stock_data['Close'].values.flatten()
-
-    # Initialize the model (Linear Regression model using Gradient Descent)
-    model = Model()
-
-    # Train the model using Gradient Descent
-    model.train(X, y)
-
-    print("trained")
-    
-    # Save the model with pickle
-    model.save()
-    print("Weights:", model.weights)
-    print("Bias:", model.bias)
-    save_last_update_date(today)
-
-    print("Model created and saved successfully.")
+ACTIONS = ['buy', 'sell', 'hold']
+GAMMA = 0.9       # Discount factor
+ALPHA = 0.1       # Learning rate
+EPSILON = 0.2     # Exploration rate
+Q_TABLE_FILE = 'q_table.pkl'
 
 
-
-
-# Class for the Stock Prediction Model (using Linear Regression with Gradient Descent)
 class Model:
     def __init__(self):
         self.weights = None
         self.bias = 0
+        self.mean = None
+        self.std = None
         self.last_updated = None
+        self.is_trained = False  # New flag to track training status
 
     def normalize(self, X):
-        return (X - self.mean) / self.std
+        if self.mean is None or self.std is None:
+            return X
+        std_safe = np.where(self.std < 1e-6, 1.0, self.std)
+        return (X - self.mean) / std_safe
+
 
     def train(self, X, y, epochs=1000, learning_rate=0.01):
-        # Compute mean and std for normalization
-        self.mean = np.mean(X, axis=0)
-        self.std = np.std(X, axis=0)
-        X = self.normalize(X)
+        # Calculate normalization stats if not exists
+        if self.mean is None:
+            self.mean = np.mean(X, axis=0)
+            self.std = np.std(X, axis=0)
+        
+        X_norm = self.normalize(X)
+        
+        # Initialize weights if needed
+        if self.weights is None:
+            self.weights = np.random.normal(scale=0.01, size=X.shape[1])  # Small random init
+        # Clip weights to prevent explosion
+        if self.weights is not None:
+            self.weights = np.clip(self.weights, -1000, 1000)
 
-        self.weights = np.zeros(X.shape[1])
-
-        for epoch in range(epochs):
-            predictions = self.predict(X, normalized=True)
-            error = predictions - y
-            gradient_w = (2 / X.shape[0]) * np.dot(X.T, error)
-            gradient_b = (2 / X.shape[0]) * np.sum(error)
-
+            
+        for _ in range(epochs):
+            predictions = np.dot(X_norm, self.weights) + self.bias
+            error = predictions - y.flatten()
+            
+            # Gradient descent with L2 regularization
+            gradient_w = (2/X.shape[0]) * np.dot(X_norm.T, error) + 0.001 * self.weights
+            gradient_b = (2/X.shape[0]) * np.sum(error)
+            
             self.weights -= learning_rate * gradient_w
             self.bias -= learning_rate * gradient_b
+        
+        self.is_trained = True
 
     def predict(self, X, normalized=False):
+        # if not self.is_trained:
+        #     print("Warning: Making prediction with untrained model!")
+        #     return np.zeros(X.shape[0])
+        if np.any(np.abs(self.weights) > 1e4):
+            print("Warning: Abnormal weight values detected.")
+
         if not normalized:
-            X = (X - self.mean) / self.std
+            X = self.normalize(X)
         return np.dot(X, self.weights) + self.bias
 
-# The rest of your methods (update, save, load) remain unchanged.
-
     def update(self, new_data, reward, action):
-        """ Update the model using Q-learning reward and action. """
-        
-        
-        
         X_new = new_data[['Open', 'High', 'Low', 'Volume']].values
         y_new = new_data['Close'].values
+        
+        # Clip reward to reasonable range
+        reward = np.clip(float(reward), -10, 10) if not isinstance(reward, (int, float)) else reward
+        
+        # Train with new data
+        self.train(X_new, y_new, epochs=50)  # Reduced epochs for online learning
+        
+        # More conservative weight adjustment
+        # try:
+        #     adjustment = 0.001 * reward * np.mean(X_new, axis=0)  # Small learning rate
+        #     if action == 'buy':
+        #         self.weights += adjustment
+        #     elif action == 'sell':
+        #         self.weights -= adjustment
+        # except Exception as e:
+        #     print("Adjustment error:", e)
 
-        # Update model using the new data first
-        self.train(X_new, y_new, epochs=100)  # Train the model on the new data
+# ... [keep other functions the same until predict_stock_price] ...
 
-        # After each action (buy, sell, hold), we adjust the model's weights with the reward
-        if action == 'buy':
-            self.weights += reward * np.mean(X_new, axis=0)  # Adjust weights based on reward
-        elif action == 'sell':
-            self.weights -= reward * np.mean(X_new, axis=0)  # Adjust weights based on reward
-
-        print(f"Model coefficients adjusted based on the {action} action and reward.")
 
     def save(self, filename="stock_model.pkl"):
-        """ Save the model using Pickle. """
-        print("saving...")
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
-        print("Model saved.")
 
     @staticmethod
     def load(filename="stock_model.pkl"):
-        """ Load the model from a Pickle file. """
         try:
             with open(filename, 'rb') as f:
-                model = pickle.load(f)
-            return model
+                return pickle.load(f)
         except FileNotFoundError:
-            # If no model file exists, return a new model
             return Model()
 
+def load_q_table():
+    if os.path.exists(Q_TABLE_FILE):
+        with open(Q_TABLE_FILE, 'rb') as f:
+            return pickle.load(f)
+    return {}
 
-# Save and load the last update date using Pickle
+def save_q_table(q_table):
+    with open(Q_TABLE_FILE, 'wb') as f:
+        pickle.dump(q_table, f)
+
+def get_state(row):
+    # Ensure we get a float value
+    if isinstance(row, pd.Series):
+        pct_change = row['Close_Change']
+    else:
+        pct_change = row['Close_Change'].iloc[0]
+    
+    #pct_change = float(pct_change)
+    pct_change=float(pct_change.iloc[0])
+    
+    if pct_change > 0.005:
+        return 'up'
+    elif pct_change < -0.005:
+        return 'down'
+    return 'stable'
+
+def choose_action(state, q_table):
+    if isinstance(state, (list, np.ndarray)):
+        state = tuple(state)
+    elif not isinstance(state, (str, tuple)):
+        state = str(state)
+
+    if np.random.rand() < EPSILON or state not in q_table:
+        return np.random.choice(ACTIONS)
+    
+    return max(q_table[state].items(), key=lambda x: x[1])[0]
+
+def simulate_reward(prev_price, current_price, action):
+    # Ensure we're working with float values
+    prev = float(prev_price.iloc[0]) if hasattr(prev_price, 'iloc') else float(prev_price)
+    curr = float(current_price.iloc[0]) if hasattr(current_price, 'iloc') else float(current_price)
+    
+    if action == 'buy':
+        return curr - prev
+    elif action == 'sell':
+        return prev - curr
+    return 0.0
+
 def save_last_update_date(date, filename="last_update_date.pkl"):
-    """ Save the last update date using Pickle. """
     with open(filename, 'wb') as f:
         pickle.dump(date, f)
-    print(f"Last update date saved as {date}.")
 
 def load_last_update_date(filename="last_update_date.pkl"):
-    """ Load the last update date from a Pickle file. """
     try:
         with open(filename, 'rb') as f:
             return pickle.load(f)
     except FileNotFoundError:
-        return None  # If no last update date, return None
+        return "2020-01-01"
 
-def split_data(X, y, train_ratio=0.8):
-    split_index = int(len(X) * train_ratio)
-    X_train = X[:split_index]
-    y_train = y[:split_index]
-    X_test = X[split_index:]
-    y_test = y[split_index:]
-    return X_train, X_test, y_train, y_test
-def evaluate_model(model, X_test, y_test):
-    predictions = model.predict(X_test)
-    mse = mean_squared_error(y_test, predictions)
-    r2 = r2_score(y_test, predictions)
+def update_model():
+    model = Model.load()
+    q_table = load_q_table()
+    last_date = load_last_update_date()
+    today = datetime.today().strftime('%Y-%m-%d')
 
-    print(f"Test MSE: {mse:.4f}")
-    print(f"R² Score: {r2:.4f}")
+    data = yf.download("AAPL", start=last_date, end=today, auto_adjust=True)
+    data['Volume'] = data['Volume'] / 1e6  # Scale volume to millions
 
-    return predictions
+    if data.empty or len(data) < 2:
+        print("Not enough data to update the model.")
+        return
 
-def plot_predictions(y_test, predictions):
-    plt.figure(figsize=(10, 5))
-    plt.plot(y_test, label='Actual Close', color='blue')
-    plt.plot(predictions, label='Predicted Close', color='orange')
-    plt.title("Actual vs. Predicted Closing Prices")
-    plt.xlabel("Test Sample Index")
-    plt.ylabel("Stock Close Price")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-def plot_confusion_matrix_like(y_true, y_pred, bins=10):
-    y_true_binned = pd.cut(y_true, bins=bins, labels=False)
-    y_pred_binned = pd.cut(y_pred, bins=bins, labels=False)
-    cm = confusion_matrix(y_true_binned, y_pred_binned)
-    
-    plt.figure(figsize=(8, 6))
-    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-    plt.title("Binned Confusion Matrix (Regression)")
-    plt.colorbar()
-    plt.xlabel("Predicted Bin")
-    plt.ylabel("Actual Bin")
-    plt.tight_layout()
-    plt.show()
-def train_and_test_on_recent_data():
-    # Load 2 years of data
-    end_date = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=730)
+    data = data.dropna().reset_index()
+    data['Close_Change'] = data['Close'].pct_change().fillna(0)
 
-    df = yf.download("AAPL", start=start_date, end=end_date).dropna()
+    print(f"Fetched {len(data)} new rows from {last_date} to {today}")
 
-    X = df[['Open', 'High', 'Low', 'Volume']].values
-    y = df['Close'].values.flatten()
+    for i in range(1, len(data)):
+        prev_row = data.iloc[i - 1]
+        curr_row = data.iloc[i]
+        prev_state = get_state(prev_row)
+        curr_state = get_state(curr_row)
 
-    # Split into training and testing
-    X_train, X_test, y_train, y_test = split_data(X, y)
+        # Initialize Q-table entries if they don't exist
+        if prev_state not in q_table:
+            q_table[prev_state] = {a: 0.0 for a in ACTIONS}
+        if curr_state not in q_table:
+            q_table[curr_state] = {a: 0.0 for a in ACTIONS}
 
-    # Train using your existing model
-    model = Model()
-    model.train(X_train, y_train)
+        action = choose_action(prev_state, q_table)
+        reward = simulate_reward(prev_row['Close'], curr_row['Close'], action)
 
-    # Evaluate
-    predictions = evaluate_model(model, X_test, y_test)
+        # Q-learning update
+        q_old = q_table[prev_state][action]
+        q_max_next = max(q_table[curr_state].values())
+        q_table[prev_state][action] = q_old + ALPHA * (reward + GAMMA * q_max_next - q_old)
 
-    mse = mean_squared_error(y_test, predictions)
-    r2 = r2_score(y_test, predictions)
-
-    print("\n--- Test Results ---")
-    print("Mean Squared Error:", mse)
-    print("R² Score:", r2)
-    mape = np.mean(np.abs((y_test - predictions) / y_test)) * 100
-    accuracy = 100 - mape
-
-    print(f"Accuracy (100 - MAPE): {accuracy:.2f}%")
-
-    # Plot results
-    plot_predictions(y_test, predictions)
-    plot_confusion_matrix_like(y_test, predictions)
-
+        # Update model weights
+        try:
+            model.update(pd.DataFrame([curr_row]), reward, action)
+        except Exception as e:
+            print(f"Error updating model: {e}")
 
     model.save()
+    save_q_table(q_table)
+    save_last_update_date(today)
+    print("Model, Q-table, and update date saved.")
 
-    last_date = dt.now().strftime("%Y-%m-%d")
-    print(f"Last update date: {last_date}")
-    
-    save_last_update_date(last_date)
-
-
-
-
-
-# Run the update process
-def main():
-    # Check if model already exists, if not, create it
-    
-    create_model()
-      #model=Model.load()
-    # #  #update_model()
-    # model=Model.load()
-    # features=np.array([[217.06,222.79,216.46,94130000]])
-    # predictedModel=model.predict(features)
-    # print(predictedModel[0])
+def predict_stock_price(open_price, high_price, low_price, volume):
+    model = Model.load()
+    features = np.array([[open_price, high_price, low_price, volume / 1e6]])
 
     
-     
-     #print(predictedModel.shape)
-    
-    # Run the model update process
+    # if not model.is_trained:
+    #     print("Error: Model needs training first! Uncomment update_model()")
+    #     return None
+        
+    prediction = model.predict(features, normalized=False)  # still False, triggers internal normalization
+    print(f"Predicted Close Price: ${prediction[0]:.2f} ")
+    if prediction[0] < open_price:
+        print("Recommended Action: SELL")
+    else:
+        print("Recommended Action: BUY/HOLD")
+    return prediction[0]
 
-    # last_date = dt.now().strftime("%Y-%m-%d")
-    # print(f"Last update date: {last_date}")
 
-    # train_and_test_on_recent_data()
-
-
-
-# Execute the main function
 if __name__ == "__main__":
-    main()
+    # MUST run this first to train the model
+    #update_model() 
+    
+    # Example prediction (will be bad until model is trained)
+    # predict_stock_price(236.81, 242.20, 235.62, 53610000) # Expected Output (Green Candle) : HOLD
+    # print("-----------------------------------")
+    # predict_stock_price(247.97,255.00,245.77,147500000) # Expected Output (Green Candle) : HOLD
+    # print("-----------------------------------")
+
+    # predict_stock_price(211.51,212.53,201.64,101350000) # Expected Output (Red Candle): SELL
+
+    predict_stock_price(234.5,254.90,213.56,1023000)
